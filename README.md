@@ -219,3 +219,56 @@ Type standardization → drop exact duplicates → add analytic flags → exclud
 unusable rows. Flags (`is_return`, `is_guest`, `price_mismatch`) are computed
 over the **deduplicated** set and *before* exclusions, so their counts describe
 the real transactions that survive into the warehouse.
+
+## Part 3 — Data Modeling
+
+`src/loader.py` builds a **star schema** at `output/warehouse.db` (SQLite,
+stdlib `sqlite3`) from the cleaned DataFrames. Rebuild with
+`python src/loader.py`.
+
+```
+                 ┌──────────────┐
+                 │   dim_date   │
+                 │  (date_key)  │
+                 └──────┬───────┘
+                        │
+  ┌────────────┐   ┌────┴─────────┐   ┌──────────────┐
+  │ dim_store  │   │  fact_sales  │   │ dim_product  │
+  │(store_key) ├───┤  (sale_key)  ├───┤(product_key) │
+  └────────────┘   └──────┬───────┘   └──────────────┘
+                          │  degenerate dims:
+                          │  transaction_id, customer_id
+```
+
+Loaded rows: `dim_date` 89 (2026-03-05 → 2026-06-01) · `dim_store` 15 ·
+`dim_product` 30 · `fact_sales` 474.
+
+### Tables
+
+| Table | Grain | Key columns | Notable attributes |
+|---|---|---|---|
+| `dim_date` | one calendar day | `date_key` (PK, `YYYYMMDD`) | `year, quarter, month, month_name, day_of_week, day_name, week_of_year, is_weekend` — spans every day in the tx window, gaps included |
+| `dim_store` | one store | `store_key` (PK, surrogate), `store_id` (natural, UNIQUE) | `store_name, city, state, zip_code, region, opened_date` |
+| `dim_product` | one product | `product_key` (PK, surrogate), `product_id` (natural, UNIQUE) | `product_name, category, unit_price` (catalog ref), `supplier_id, price_valid` |
+| `fact_sales` | one transaction | `sale_key` (PK), FKs → all three dims | `quantity, unit_price, total_amount, is_return, is_guest, price_mismatch`; `transaction_id` + `customer_id` as degenerate dimensions |
+
+**Key choices.** Integer **surrogate keys** on every dimension (stable, compact
+joins, decoupled from source keys) with the natural business key retained for
+traceability. `date_key` uses the conventional `YYYYMMDD` integer. FK, UNIQUE and
+NOT NULL constraints are declared in DDL and `PRAGMA foreign_keys` is enabled, so
+SQLite enforces referential integrity at load time (verified: 0 orphan facts).
+
+### Required modeling decisions
+
+- **Products with more than one price** — resolved in cleaning: the higher price
+  is stored as the catalog reference in `dim_product.unit_price`. Revenue is
+  **never** derived from it — `fact_sales` carries the per-transaction
+  `unit_price`/`total_amount` — so the reference price is informational only.
+- **Returns (negative transactions)** — kept as ordinary fact rows with negative
+  `quantity`/`total_amount` and `is_return = 1`. They net down revenue in
+  aggregate (30 rows, −$9,952.03) instead of being excluded.
+- **Records excluded from the warehouse** — the 16 orphaned-FK / zero-qty /
+  future-dated transactions are dropped during cleaning (Part 2) and logged in
+  `output/cleaning_report.json`; they never reach the fact table.
+- **Guest transactions** — kept with `customer_id` NULL and `is_guest = 1`;
+  filtered out only by customer-level analytics (Part 4).
