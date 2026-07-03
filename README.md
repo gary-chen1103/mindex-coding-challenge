@@ -272,3 +272,42 @@ SQLite enforces referential integrity at load time (verified: 0 orphan facts).
   `output/cleaning_report.json`; they never reach the fact table.
 - **Guest transactions** — kept with `customer_id` NULL and `is_guest = 1`;
   filtered out only by customer-level analytics (Part 4).
+
+## Part 4 — Analytics
+
+`src/analytics.py` answers the five business questions and writes
+`output/analytics.json`. Run with `python src/analytics.py` (requires the
+warehouse — run `python src/loader.py` first).
+
+**Why SQL over pandas.** The data is already cleaned and modeled into a star
+schema, so each question is a set-based aggregation over `fact_sales` joined to
+its dimensions — SQL's core strength. Querying the warehouse also exercises the
+model the way a downstream analyst/BI tool would, and keeps the business logic
+declarative and auditable. Two derived values (MoM % change, the return-rate
+flag) are computed in Python on top of the SQL aggregates, where guarded
+division and nested output shaping read more clearly.
+
+### Definitions & decisions
+
+| Question | Definition used |
+|---|---|
+| **Q1 — Top 5 stores by net revenue (30d)** | Net revenue = `SUM(total_amount)` including returns (negative), over the 30 calendar days ending on the latest data date (2026-05-03 → 2026-06-01). |
+| **Q2 — MoM revenue change % by category** | Net revenue per (category, month); `mom_change_pct = (m − m₋₁) / m₋₁ × 100`. Null for a category's first month or after a zero-revenue month. |
+| **Q3 — Return rate by store** | `SUM(is_return) / COUNT(*)` per store; `high_return_rate = rate > 10%`. |
+| **Q4 — Avg transaction value by region** | `AVG(total_amount)` per region, `WHERE is_return = 0`. |
+| **Q5 — Top 10 customers by lifetime spend** | `SUM(total_amount)` net of returns, `WHERE is_guest = 0`; includes transaction count and AOV = spend / txn count. |
+
+### Selected findings
+
+- **Q1:** Southpark Meadows (S011) leads the trailing-30-day window at
+  **$7,342.43**, followed by Galleria at Crystal Run and Eastview Mall.
+- **Q3:** three stores exceed the 10% return-rate threshold and are flagged —
+  **S015** (15.4%), **S006** (12.5%), **S008** (11.6%).
+- **Q4:** average transaction value is fairly flat across regions
+  (~$340–$397); "Unknown" is the two stores whose region was imputed in Part 2.
+- **Q5:** top customer **CUST0213** spent **$3,077.96** over 4 transactions.
+
+> **Caveat (Q2):** the data window ends on **2026-06-01**, so "June 2026" is a
+> single day. Its steep MoM drop (≈ −96% to −99%) is a partial-period artifact,
+> not a real trend — reported honestly rather than silently dropped. Categories
+> with no sales on that day simply have no June row.
