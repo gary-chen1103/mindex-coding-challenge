@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so tests can `from src.x import ...` without
+# an installed package, and only collect from tests/.
+pythonpath = ["."]
+testpaths = ["tests"]
