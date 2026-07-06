@@ -311,3 +311,20 @@ division and nested output shaping read more clearly.
 > single day. Its steep MoM drop (≈ −96% to −99%) is a partial-period artifact,
 > not a real trend — reported honestly rather than silently dropped. Categories
 > with no sales on that day simply have no June row.
+
+## Part 5 — Tests
+
+`tests/test_pipeline.py` (run with `pytest`). Pytest config lives in
+`pyproject.toml` (`pythonpath = ["."]` so `from src... import` resolves without
+installing the package). Every test builds its own tiny, fully-known input and
+asserts hand-computed expected values — no smoke tests.
+
+| Area | Tests | Coverage |
+|---|---|---|
+| Profiling | 3 | Known counts / null % / numeric + date stats; **edge cases**: empty DataFrame and all-null column. |
+| Cleaning | 3 | Zip zero-padding + `store_id` dedup + region imputation; multi-price → keep highest + zero-price flag; transaction currency parsing, `is_return`/`is_guest`/`price_mismatch` flags, and orphan/zero-qty/future exclusions. |
+| Analytics | 1 | Loads a hand-built `CleanResult` into a temp SQLite warehouse and validates return rate (+flag), avg value by region (returns excluded), top customers (guests excluded), and net-revenue ranking. |
+
+```bash
+pytest            # 7 passed
+```
