@@ -16,7 +16,7 @@ Design note — why we read every column as a string:
     for the Part 2 cleaning decisions.
 
 Usage:
-    python src/profiler.py          # or: python -m src.profiler
+    python -m src.profiler
 """
 
 from __future__ import annotations

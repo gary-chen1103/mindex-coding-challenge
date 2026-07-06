@@ -32,7 +32,7 @@ Key modeling decisions (see README for the full write-up)
   ``is_guest = 1``; excluded only from customer-level analytics (Part 4).
 
 Usage:
-    python src/loader.py            # or: python -m src.loader
+    python -m src.loader
 """
 
 from __future__ import annotations
