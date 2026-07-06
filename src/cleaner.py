@@ -14,7 +14,7 @@ duplicates → add flags → exclude unusable rows. Flags are added before the
 exclusions so counts (e.g. returns, guests) are taken over the deduplicated set.
 
 Usage:
-    python3 src/cleaner.py          # or: python3 -m src.cleaner
+    python -m src.cleaner
 """
 
 from __future__ import annotations

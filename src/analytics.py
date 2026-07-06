@@ -18,7 +18,7 @@ guarded division (avoiding divide-by-zero) and shaping nested output read more
 clearly there.
 
 Usage:
-    python src/analytics.py         # or: python -m src.analytics
+    python -m src.analytics
 """
 
 from __future__ import annotations
