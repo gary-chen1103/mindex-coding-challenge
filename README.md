@@ -196,6 +196,66 @@ python -m src.analytics      # Part 4 → output/analytics.json (needs the wareh
 order, so a full run produces the same artifacts as running the stages
 individually.
 
+## Architecture
+
+Four stages, one direction of flow. Each stage reads the previous stage's output
+(or the raw files), does one job, and writes an inspectable artifact — so any
+stage can be re-run, tested, or debugged in isolation.
+
+```
+        data/raw/*.csv   (stores, products, transactions — never modified)
+              │
+              ▼
+     ┌──────────────────┐
+     │  profiler.py      │  read every column as string → infer types →
+     │  (Part 1)         │  quality stats            ──▶ output/profiling_report.json
+     └────────┬──────────┘
+              │  raw CSVs
+              ▼
+     ┌──────────────────┐
+     │  cleaner.py       │  deliberate fixes (impute / dedup / flag /
+     │  (Part 2)         │  exclude) + analytic flags
+     │                   │                           ──▶ output/cleaning_report.json
+     └────────┬──────────┘
+              │  CleanResult(stores, products, transactions)
+              ▼
+     ┌──────────────────┐
+     │  loader.py        │  surrogate keys + star schema, FK-enforced
+     │  (Part 3)         │                           ──▶ output/warehouse.db
+     └────────┬──────────┘
+              │  warehouse.db (dim_date · dim_store · dim_product · fact_sales)
+              ▼
+     ┌──────────────────┐
+     │  analytics.py     │  5 business questions in SQL
+     │  (Part 4)         │                           ──▶ output/analytics.json
+     └──────────────────┘
+
+  pipeline.py  orchestrates all four stages in order (python -m src.pipeline).
+  tests/       (Part 5) validate each stage against small, hand-computed fixtures.
+```
+
+| Module | Part | Responsibility | Output |
+|---|---|---|---|
+| `profiler.py` | 1 | Type-inferring data profile of each raw file | `profiling_report.json` |
+| `cleaner.py` | 2 | Deliberate cleaning + analytic flags → `CleanResult` | `cleaning_report.json` |
+| `loader.py` | 3 | Star-schema warehouse with enforced integrity | `warehouse.db` |
+| `analytics.py` | 4 | Business questions over the warehouse | `analytics.json` |
+| `pipeline.py` | — | End-to-end orchestration | all of the above |
+
+**Design principles.** (1) *Read raw, decide explicitly* — every column is read as
+a string so pandas' type inference can't silently mangle data (e.g. leading-zero
+zips); the profiler surfaces problems and the cleaner resolves each one on the
+record. (2) *Every decision is logged* — cleaning writes a machine-readable report
+whose counts are produced by the same code that cleans, so the docs can't drift
+from what ran. (3) *Push correctness into the schema* — PK/FK/UNIQUE/NOT NULL are
+declared in DDL so the database itself rejects an invalid load. (4) *Testable
+seams* — each stage is a pure-ish function accepting inputs and returning data
+(`clean_all()`, `build_warehouse(clean=...)`, `run_analytics(db_path=...)`), so
+tests inject controlled fixtures instead of touching the real files.
+
+The **data quality findings table** and **schema design / modeling decisions**
+that Part 6 also asks for are documented in the Part 2 and Part 3 sections below.
+
 ## Part 2 — Data Quality Findings
 
 The cleaning pipeline (`src/cleaner.py`) reads the raw CSVs as strings (so no
@@ -355,3 +415,72 @@ asserts hand-computed expected values — no smoke tests.
 ```bash
 pytest            # 7 passed
 ```
+
+## Part 6 — Productionizing This Pipeline
+
+This is a batch pipeline over a static snapshot. Turning it into a
+production system means addressing three things.
+
+### Orchestration
+
+Each stage is already a discrete, parameterized function with a clean boundary,
+so it maps 1:1 onto tasks in an orchestrator (Airflow / Dagster / Prefect):
+
+```
+profile ──▶ clean ──▶ load ──▶ analytics
+```
+
+- **Trigger on data arrival**, not a wall clock — run when a new extract lands.
+- **Pass the extract date in**, don't hardcode it. `clean_all(as_of_date=...)` is
+  already a parameter (see the Reference date note); production would source it
+  from the extract's metadata so "future-dated" is always relative to that pull.
+- **Gate the DAG on quality** — treat the profiling/cleaning report as a
+  checkpoint and fail (or quarantine) the run when thresholds are breached
+  (e.g. null-rate spike, row-count drop, any orphan FK) rather than loading bad
+  data.
+- **Idempotent, retryable tasks** — a failed load should be safe to re-run.
+
+### Incremental loads
+
+The loader is currently **full-refresh** (drop and rebuild) — fine at this
+scale, wrong at billions of rows. Production would:
+
+- **Partition `fact_sales` by date** and load only the new/changed partitions
+  from each extract, using an idempotent upsert keyed on `transaction_id` so
+  re-runs don't double-count.
+- **Extend, not rebuild, the dimensions.** `dim_date` grows forward. Store /
+  product dimensions become **slowly-changing** — Type 1 for corrections,
+  Type 2 (effective-dated rows) where history matters, e.g. a store changing
+  region or a product's catalog price over time.
+- **Late-arriving & out-of-order data** — handle extracts that backfill older
+  dates without corrupting already-published aggregates.
+
+### Observability
+
+- **Emit the reports as metrics.** The profiling and cleaning JSON already
+  quantify quality per run; ship those (row counts in/out per stage, null %,
+  exclusion counts, return rate) to a monitoring system and alert on drift.
+- **Data-quality tests as first-class checks** (Great Expectations / dbt tests)
+  running in the DAG, not just unit tests in CI.
+- **Lineage & structured run logs** — which extract produced which warehouse
+  version, how many rows each stage dropped and why, run duration and status.
+- **CI** — run `pytest` on every change; block merges on failure.
+
+## What I'd Do Differently With More Time
+
+- **Swap SQLite for a real analytical store** (DuckDB locally, or
+  Postgres / Snowflake / BigQuery). SQLite is single-writer and perfect for a
+  self-contained deliverable, but not for concurrent BI access or scale.
+- **Layer the warehouse** raw → staging → marts (dbt-style) instead of one
+  loader module, so transformations are versioned, tested, and documented as SQL.
+- **Make cleaning rules declarative** — a config/registry of rules with
+  externalized thresholds, rather than logic hardcoded per function, so a new
+  data issue is a config change plus a test.
+- **Close test gaps** — Q2 (month-over-month) is the most logic-heavy analytic
+  and is currently unverified; I'd add a two-month fixture (including the
+  zero-prior-month → null branch), an empty-warehouse edge case, and
+  property-based tests for the currency/date parsers.
+- **Effective-dated pricing** — if the source carried price dates, model
+  multiple product prices as an SCD-2 dimension instead of collapsing to the
+  highest catalog price.
+- **Tooling** — add `mypy` and `ruff` to CI for type-safety and lint.
